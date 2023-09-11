@@ -56,6 +56,7 @@
       <dependency>
         <groupId>com.fasterxml.jackson.core</groupId>
         <artifactId>jackson-core</artifactId>
+        <version>2.16.0-SNAPSHOT</version>
       </dependency>
 
       <dependency>
@@ -151,6 +152,12 @@
 	<version>${version.junit}</version>
         <scope>test</scope>
       </dependency>
+
+      <dependency>
+        <groupId>org.jctools</groupId>
+        <artifactId>jctools-core</artifactId>
+        <version>4.0.1</version>
+      </dependency>
     </dependencies>
 
     <build>
@@ -163,8 +170,9 @@
    accidental odd results (they vary between major JDK versions)
   -->
             <configuration>
-              <source>1.8</source>
-              <target>1.8</target>
+              <source>20</source>
+              <target>20</target>
+              <compilerArgument>--enable-preview</compilerArgument>
               <showDeprecation>true</showDeprecation>
               <showWarnings>true</showWarnings>
               <optimize>true</optimize>
