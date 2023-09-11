@@ -53,7 +53,7 @@ public class JacksonMultithreadWriteVanilla {
     }
 
     private JSON createJson() {
-        BufferRecyclerPool pool = PoolStrategy.valueOf(poolStrategy).getPool();
+        BufferRecyclerPool pool = Pools.PoolStrategy.valueOf(poolStrategy).getPool();
         JsonFactory jsonFactory = new JsonFactory().setBufferRecyclerPool(pool);
         return new JSON(jsonFactory);
     }
@@ -128,23 +128,6 @@ public class JacksonMultithreadWriteVanilla {
 
         public void setAge(int age) {
             this.age = age;
-        }
-    }
-
-    enum PoolStrategy {
-        NO_OP(BufferRecyclerPool.nonRecyclingPool()),
-        THREAD_LOCAL(BufferRecyclerPool.threadLocalPool()),
-        CONCURRENT_DEQUEUE(BufferRecyclerPool.ConcurrentDequePool.shared()),
-        LOCK_FREE(BufferRecyclerPool.LockFreePool.shared());
-
-        private final BufferRecyclerPool pool;
-
-        PoolStrategy(BufferRecyclerPool pool) {
-            this.pool = pool;
-        }
-
-        public BufferRecyclerPool getPool() {
-            return pool;
         }
     }
 }

@@ -23,26 +23,10 @@ import java.util.concurrent.TimeUnit;
 
 @State(value = Scope.Benchmark)
 @Measurement(iterations = 10)
-@Fork(1)
+@Fork(2)
 @Threads(Threads.MAX)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 public class JacksonWriteVanilla {
-
-    /**
-     * Benchmark                               (objectSize)      (poolStrategy)   Mode  Cnt        Score        Error  Units
-     * JacksonWriteVanilla.writePojoMediaItem         large               NO_OP  thrpt   10   751326.678 ±   2682.525  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         large        THREAD_LOCAL  thrpt   10  1563622.185 ±  13327.590  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         large           LOCK_FREE  thrpt   10  1564139.884 ±   6202.993  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         large  CONCURRENT_DEQUEUE  thrpt   10  1449827.384 ±   6733.889  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         large             JCTOOLS  thrpt   10   751345.199 ±   2841.050  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         large     JCTOOLS_RELAXED  thrpt   10   381658.315 ± 308411.917  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         small               NO_OP  thrpt   10   431962.030 ±  17287.333  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         small        THREAD_LOCAL  thrpt   10  3503147.257 ±  96102.345  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         small           LOCK_FREE  thrpt   10  1113022.347 ±  34818.978  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         small  CONCURRENT_DEQUEUE  thrpt   10  1681424.667 ±  36802.516  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         small             JCTOOLS  thrpt   10   455114.659 ±  13543.961  ops/s
-     * JacksonWriteVanilla.writePojoMediaItem         small     JCTOOLS_RELAXED  thrpt   10   444419.688 ±  11659.952  ops/s
-     */
 
     private JSON json;
 
@@ -54,6 +38,9 @@ public class JacksonWriteVanilla {
     @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE", "JCTOOLS", "JCTOOLS_RELAXED"})
     private String poolStrategy;
 
+    @Param({"0", "10", "100"})
+    private int acquireDelay;
+
     @Setup
     public void setup() {
         this.json = createJson();
@@ -61,7 +48,7 @@ public class JacksonWriteVanilla {
     }
 
     private JSON createJson() {
-        BufferRecyclerPool pool = PoolStrategy.valueOf(poolStrategy).getPool();
+        BufferRecyclerPool pool = Pools.PoolStrategy.valueOf(poolStrategy).getPool();
         JsonFactory jsonFactory = new JsonFactory().setBufferRecyclerPool(pool);
         return new JSON(jsonFactory);
     }
@@ -70,6 +57,9 @@ public class JacksonWriteVanilla {
     @OutputTimeUnit(TimeUnit.SECONDS)
     public void writePojoMediaItem(Blackhole bh) throws Exception {
         bh.consume(write(item, json));
+        if (acquireDelay > 0) {
+            bh.consumeCPU(acquireDelay);
+        }
     }
 
     protected final int write(Object value, JSON writer) {
@@ -115,61 +105,6 @@ public class JacksonWriteVanilla {
 
         public void setAge(int age) {
             this.age = age;
-        }
-    }
-
-    enum PoolStrategy {
-        NO_OP(BufferRecyclerPool.nonRecyclingPool()),
-        THREAD_LOCAL(BufferRecyclerPool.threadLocalPool()),
-        CONCURRENT_DEQUEUE(BufferRecyclerPool.ConcurrentDequePool.shared()),
-        LOCK_FREE(BufferRecyclerPool.LockFreePool.shared()),
-        JCTOOLS(JCToolsPool.INSTANCE),
-        JCTOOLS_RELAXED(JCToolsRelaxedPool.INSTANCE);
-
-        private final BufferRecyclerPool pool;
-
-        PoolStrategy(BufferRecyclerPool pool) {
-            this.pool = pool;
-        }
-
-        public BufferRecyclerPool getPool() {
-            return pool;
-        }
-    }
-
-    static class JCToolsPool implements BufferRecyclerPool {
-
-        static final BufferRecyclerPool INSTANCE = new JCToolsPool();
-
-        private final MpmcUnboundedXaddArrayQueue<BufferRecycler> queue = new MpmcUnboundedXaddArrayQueue<>(8);
-
-        @Override
-        public BufferRecycler acquireBufferRecycler() {
-            BufferRecycler bufferRecycler = queue.poll();
-            return bufferRecycler != null ? bufferRecycler : new BufferRecycler();
-        }
-
-        @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
-            queue.offer(recycler);
-        }
-    }
-
-    static class JCToolsRelaxedPool implements BufferRecyclerPool {
-
-        static final BufferRecyclerPool INSTANCE = new JCToolsRelaxedPool();
-
-        private final MpmcUnboundedXaddArrayQueue<BufferRecycler> queue = new MpmcUnboundedXaddArrayQueue<>(8);
-
-        @Override
-        public BufferRecycler acquireBufferRecycler() {
-            BufferRecycler bufferRecycler = queue.relaxedPoll();
-            return bufferRecycler != null ? bufferRecycler : new BufferRecycler();
-        }
-
-        @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
-            queue.offer(recycler);
         }
     }
 }
