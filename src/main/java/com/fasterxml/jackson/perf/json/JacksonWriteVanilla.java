@@ -35,7 +35,8 @@ public class JacksonWriteVanilla {
     @Param({"large", "small"})
     private String objectSize;
 
-    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE", "JCTOOLS"})
+//    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "STRIPED_LOCK_FREE", "CONCURRENT_DEQUEUE", "JCTOOLS", "STRIPED_JCTOOLS"})
+    @Param({"STRIPED_LOCK_FREE", "STRIPED_JCTOOLS"})
     private String poolStrategy;
 
     @Param({"0", "10", "100"})
@@ -55,7 +56,7 @@ public class JacksonWriteVanilla {
 
     @Benchmark
     @OutputTimeUnit(TimeUnit.SECONDS)
-    public void writePojoMediaItem(Blackhole bh) throws Exception {
+    public void writePojoMediaItem(Blackhole bh) {
         bh.consume(write(item, json));
         if (acquireDelay > 0) {
             bh.consumeCPU(acquireDelay);
@@ -105,6 +106,18 @@ public class JacksonWriteVanilla {
 
         public void setAge(int age) {
             this.age = age;
+        }
+    }
+
+    public static void main(String[] args) {
+        JacksonWriteVanilla benchmark = new JacksonWriteVanilla();
+        benchmark.poolStrategy = "STRIPED_LOCK_FREE";
+        benchmark.objectSize = "small";
+        benchmark.setup();
+
+        Blackhole bh = new Blackhole("Today's password is swordfish. I understand instantiating Blackholes directly is dangerous.");
+        for (int i = 0; i < 10; i++) {
+            benchmark.writePojoMediaItem(bh);
         }
     }
 }

@@ -5,6 +5,9 @@ import com.fasterxml.jackson.core.util.BufferRecyclerPool;
 import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
 import org.jctools.util.UnsafeAccess;
 
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
+
 public class Pools {
     enum PoolStrategy {
         NO_OP(BufferRecyclerPool.nonRecyclingPool()),
@@ -12,7 +15,8 @@ public class Pools {
         CONCURRENT_DEQUEUE(BufferRecyclerPool.ConcurrentDequePool.shared()),
         LOCK_FREE(BufferRecyclerPool.LockFreePool.shared()),
         JCTOOLS(JCToolsPool.INSTANCE),
-        JCTOOLS_RELAXED(JCToolsRelaxedPool.INSTANCE);
+        STRIPED_LOCK_FREE(STRIPED_LOCK_FREE_INSTANCE),
+        STRIPED_JCTOOLS(STRIPED_JCTOOLS_INSTANCE);
 
         private final BufferRecyclerPool pool;
 
@@ -43,27 +47,25 @@ public class Pools {
         }
     }
 
-    static class JCToolsRelaxedPool implements BufferRecyclerPool {
+    private static final BufferRecyclerPool STRIPED_JCTOOLS_INSTANCE = new StripedPool(JCToolsPool::new, 4);
 
-        static final BufferRecyclerPool INSTANCE = new JCToolsRelaxedPool();
+    private static final BufferRecyclerPool STRIPED_LOCK_FREE_INSTANCE = new StripedPool(BufferRecyclerPool.LockFreePool::nonShared, 4);
 
-        private final MpmcUnboundedXaddArrayQueue<BufferRecycler> queue = new MpmcUnboundedXaddArrayQueue<>(256);
-
-        @Override
-        public BufferRecycler acquireBufferRecycler() {
-            BufferRecycler bufferRecycler = queue.relaxedPoll();
-            return bufferRecycler != null ? bufferRecycler : new BufferRecycler();
-        }
-
-        @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
-            queue.offer(recycler);
-        }
-    }
-
-    static class JCToolsStripedPool implements BufferRecyclerPool {
+    static class StripedPool implements BufferRecyclerPool {
 
         private static final long PROBE = getProbeOffset();
+
+        private final int mask;
+
+        private final BufferRecyclerPool[] pools;
+
+        public StripedPool(Supplier<BufferRecyclerPool> poolFactory, int slots) {
+            this.mask = slots-1;
+            this.pools = new BufferRecyclerPool[slots];
+            for (int i = 0; i < slots; i++) {
+                this.pools[i] = poolFactory.get();
+            }
+        }
 
         private static long getProbeOffset() {
             try {
@@ -73,14 +75,27 @@ public class Pools {
             }
         }
 
+        private int index() {
+            return probe() & mask;
+        }
+
+        private int probe() {
+            int probe;
+            if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
+                ThreadLocalRandom.current(); // force initialization
+                probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
+            }
+            return probe;
+        }
+
         @Override
         public BufferRecycler acquireBufferRecycler() {
-            return null;
+            return pools[index()].acquireBufferRecycler();
         }
 
         @Override
         public void releaseBufferRecycler(BufferRecycler recycler) {
-
+            pools[index()].releaseBufferRecycler(recycler);
         }
     }
 
