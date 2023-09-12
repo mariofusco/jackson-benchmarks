@@ -35,7 +35,7 @@ public class JacksonWriteVanilla {
     @Param({"large", "small"})
     private String objectSize;
 
-    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE", "JCTOOLS", "JCTOOLS_RELAXED"})
+    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE", "JCTOOLS"})
     private String poolStrategy;
 
     @Param({"0", "10", "100"})
