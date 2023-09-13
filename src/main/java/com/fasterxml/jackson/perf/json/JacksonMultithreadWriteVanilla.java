@@ -42,7 +42,8 @@ public class JacksonMultithreadWriteVanilla {
     @Param({"small"})
     private String objectSize;
 
-    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE"})
+//    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE"})
+    @Param({"THREAD_LOCAL", "HYBRID"})
     private String poolStrategy;
 
     @Setup

@@ -16,7 +16,8 @@ public class Pools {
         LOCK_FREE(BufferRecyclerPool.LockFreePool.shared()),
         JCTOOLS(JCToolsPool.INSTANCE),
         STRIPED_LOCK_FREE(STRIPED_LOCK_FREE_INSTANCE),
-        STRIPED_JCTOOLS(STRIPED_JCTOOLS_INSTANCE);
+        STRIPED_JCTOOLS(STRIPED_JCTOOLS_INSTANCE),
+        HYBRID(HybridPool.INSTANCE);
 
         private final BufferRecyclerPool pool;
 
@@ -99,4 +100,22 @@ public class Pools {
         }
     }
 
+    static class HybridPool implements BufferRecyclerPool {
+
+        static final BufferRecyclerPool INSTANCE = new HybridPool();
+
+        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+        private final BufferRecyclerPool virtualPool = STRIPED_JCTOOLS_INSTANCE;
+
+        @Override
+        public BufferRecycler acquireBufferRecycler() {
+            return Thread.currentThread().isVirtual() ? virtualPool.acquireBufferRecycler() : nativePool.acquireBufferRecycler();
+        }
+
+        @Override
+        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+            if (Thread.currentThread().isVirtual()) virtualPool.releaseBufferRecycler(bufferRecycler);
+            else nativePool.releaseBufferRecycler(bufferRecycler);
+        }
+    }
 }
