@@ -3,6 +3,7 @@ package com.fasterxml.jackson.perf.json;
 import com.fasterxml.jackson.core.util.BufferRecycler;
 import com.fasterxml.jackson.core.util.BufferRecyclerPool;
 import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
+import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -129,11 +130,17 @@ public class Pools {
 
             private final MpmcUnboundedXaddArrayQueue<BufferRecycler>[] queues;
 
-            public StripedJCToolsPool(int slots) {
-                this.mask = slots-1;
-                this.queues = new MpmcUnboundedXaddArrayQueue[slots];
-                for (int i = 0; i < slots; i++) {
-                    this.queues[i] = new MpmcUnboundedXaddArrayQueue<>(256);
+            public StripedJCToolsPool(int stripesCount) {
+                if (stripesCount <= 0) {
+                    throw new IllegalArgumentException("Expecting a stripesCount that is larger than 0");
+                }
+
+                int size = Pow2.roundToPowerOfTwo(stripesCount);
+                mask = (size - 1);
+
+                this.queues = new MpmcUnboundedXaddArrayQueue[size];
+                for (int i = 0; i < size; i++) {
+                    this.queues[i] = new MpmcUnboundedXaddArrayQueue<>(128);
                 }
             }
 
@@ -150,11 +157,28 @@ public class Pools {
             }
 
             private int probe() {
-                int probe;
-                if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
-                    ThreadLocalRandom.current(); // force initialization
-                    probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
+                // Fast path for reliable well-distributed probe, available from JDK 7+.
+                // As long as PROBE is final static this branch will be constant folded
+                // (i.e removed).
+                if (PROBE != -1) {
+                    int probe;
+                    if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
+                        ThreadLocalRandom.current(); // force initialization
+                        probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
+                    }
+                    return probe;
                 }
+
+                /*
+                 * Else use much worse (for values distribution) method:
+                 * Mix thread id with golden ratio and then xorshift it
+                 * to spread consecutive ids (see Knuth multiplicative method as reference).
+                 */
+                int probe = (int) ((Thread.currentThread().getId() * 0x9e3779b9) & Integer.MAX_VALUE);
+                // xorshift
+                probe ^= probe << 13;
+                probe ^= probe >>> 17;
+                probe ^= probe << 5;
                 return probe;
             }
 
