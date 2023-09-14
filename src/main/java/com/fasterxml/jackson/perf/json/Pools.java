@@ -114,7 +114,7 @@ public class Pools {
 
         @Override
         public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
-            if (bufferRecycler instanceof PooledBufferRecycler) {
+            if (bufferRecycler instanceof VThreadBufferRecycler) {
                 // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
                 virtualPool.releaseBufferRecycler(bufferRecycler);
             }
@@ -162,19 +162,19 @@ public class Pools {
             public BufferRecycler acquireBufferRecycler() {
                 int index = index();
                 BufferRecycler bufferRecycler = queues[index].poll();
-                return bufferRecycler != null ? bufferRecycler : new PooledBufferRecycler(index);
+                return bufferRecycler != null ? bufferRecycler : new VThreadBufferRecycler(index);
             }
 
             @Override
             public void releaseBufferRecycler(BufferRecycler recycler) {
-                queues[((PooledBufferRecycler) recycler).slot].offer(recycler);
+                queues[((VThreadBufferRecycler) recycler).slot].offer(recycler);
             }
         }
 
-        static class PooledBufferRecycler extends BufferRecycler {
+        static class VThreadBufferRecycler extends BufferRecycler {
             private final int slot;
 
-            PooledBufferRecycler(int slot) {
+            VThreadBufferRecycler(int slot) {
                 this.slot = slot;
             }
         }
