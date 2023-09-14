@@ -105,7 +105,7 @@ public class Pools {
         static final BufferRecyclerPool INSTANCE = new HybridPool();
 
         private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
-        private final BufferRecyclerPool virtualPool = STRIPED_JCTOOLS_INSTANCE;
+        private final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4);
 
         @Override
         public BufferRecycler acquireBufferRecycler() {
@@ -114,8 +114,69 @@ public class Pools {
 
         @Override
         public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
-            if (Thread.currentThread().isVirtual()) virtualPool.releaseBufferRecycler(bufferRecycler);
-            else nativePool.releaseBufferRecycler(bufferRecycler);
+            if (bufferRecycler instanceof PooledBufferRecycler) {
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
+                virtualPool.releaseBufferRecycler(bufferRecycler);
+            }
+            // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
+        }
+
+        static class StripedJCToolsPool implements BufferRecyclerPool {
+
+            private static final long PROBE = getProbeOffset();
+
+            private final int mask;
+
+            private final MpmcUnboundedXaddArrayQueue<BufferRecycler>[] queues;
+
+            public StripedJCToolsPool(int slots) {
+                this.mask = slots-1;
+                this.queues = new MpmcUnboundedXaddArrayQueue[slots];
+                for (int i = 0; i < slots; i++) {
+                    this.queues[i] = new MpmcUnboundedXaddArrayQueue<>(256);
+                }
+            }
+
+            private static long getProbeOffset() {
+                try {
+                    return UnsafeAccess.UNSAFE.objectFieldOffset(Thread.class.getDeclaredField("threadLocalRandomProbe"));
+                } catch (NoSuchFieldException e) {
+                    throw new UnsupportedOperationException(e);
+                }
+            }
+
+            private int index() {
+                return probe() & mask;
+            }
+
+            private int probe() {
+                int probe;
+                if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
+                    ThreadLocalRandom.current(); // force initialization
+                    probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
+                }
+                return probe;
+            }
+
+            @Override
+            public BufferRecycler acquireBufferRecycler() {
+                int index = index();
+                BufferRecycler bufferRecycler = queues[index].poll();
+                return bufferRecycler != null ? bufferRecycler : new PooledBufferRecycler(index);
+            }
+
+            @Override
+            public void releaseBufferRecycler(BufferRecycler recycler) {
+                queues[((PooledBufferRecycler) recycler).slot].offer(recycler);
+            }
+        }
+
+        static class PooledBufferRecycler extends BufferRecycler {
+            private final int slot;
+
+            PooledBufferRecycler(int slot) {
+                this.slot = slot;
+            }
         }
     }
 }
