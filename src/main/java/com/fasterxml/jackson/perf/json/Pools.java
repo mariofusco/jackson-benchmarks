@@ -6,7 +6,11 @@ import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
 import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 public class Pools {
@@ -105,19 +109,42 @@ public class Pools {
 
         static final BufferRecyclerPool INSTANCE = new HybridPool();
 
+        private static final Predicate<Thread> isVirtual = findIsVirtual();
+
+        private static Predicate<Thread> findIsVirtual() {
+            try {
+                MethodHandle virtualMh = MethodHandles.publicLookup().findVirtual(Thread.class, "isVirtual", MethodType.methodType(boolean.class));
+                return t -> {
+                    try {
+                        return (boolean) virtualMh.invokeExact(t);
+                    } catch (Throwable e) {
+                        throw new RuntimeException(e);
+                    }
+                };
+            } catch (Exception e) {
+                return t -> false;
+            }
+        }
+
         private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
-        private final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4);
+
+        static class VirtualPoolHolder {
+            // Lazy on-demand initialization
+            private static final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4);
+        }
 
         @Override
         public BufferRecycler acquireBufferRecycler() {
-            return Thread.currentThread().isVirtual() ? virtualPool.acquireBufferRecycler() : nativePool.acquireBufferRecycler();
+            return isVirtual.test(Thread.currentThread()) ?
+                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
+                    nativePool.acquireBufferRecycler();
         }
 
         @Override
         public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
             if (bufferRecycler instanceof VThreadBufferRecycler) {
                 // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
-                virtualPool.releaseBufferRecycler(bufferRecycler);
+                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
             }
             // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
         }
@@ -148,7 +175,7 @@ public class Pools {
                 try {
                     return UnsafeAccess.UNSAFE.objectFieldOffset(Thread.class.getDeclaredField("threadLocalRandomProbe"));
                 } catch (NoSuchFieldException e) {
-                    throw new UnsupportedOperationException(e);
+                    return -1L;
                 }
             }
 
