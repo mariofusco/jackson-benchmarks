@@ -10,6 +10,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -130,15 +131,18 @@ public class Pools {
         }
     }
 
-    interface ThreadProbe {
-        int index();
+    static abstract class ThreadProbe {
+        abstract int index();
 
         static ThreadProbe createThreadProbe(int mask, boolean allowUnsafe) {
+            if (allowUnsafe && UnsafeThreadProbe.getProbeOffset() == -1L) {
+                throw new UnsupportedOperationException("Cannot use unsafe probe");
+            }
             return allowUnsafe ? new UnsafeThreadProbe(mask) : new XorShiftThreadProbe(mask);
         }
     }
 
-    static class UnsafeThreadProbe implements ThreadProbe {
+    static class UnsafeThreadProbe extends ThreadProbe {
 
         private static final long PROBE = getProbeOffset();
 
@@ -163,33 +167,16 @@ public class Pools {
         }
 
         private int probe() {
-            // Fast path for reliable well-distributed probe, available from JDK 7+.
-            // As long as PROBE is final static this branch will be constant folded
-            // (i.e removed).
-            if (PROBE != -1) {
-                int probe;
-                if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
-                    ThreadLocalRandom.current(); // force initialization
-                    probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
-                }
-                return probe;
+            int probe;
+            if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
+                ThreadLocalRandom.current(); // force initialization
+                probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
             }
-
-            /*
-             * Else use much worse (for values distribution) method:
-             * Mix thread id with golden ratio and then xorshift it
-             * to spread consecutive ids (see Knuth multiplicative method as reference).
-             */
-            int probe = (int) ((Thread.currentThread().getId() * 0x9e3779b9) & Integer.MAX_VALUE);
-            // xorshift
-            probe ^= probe << 13;
-            probe ^= probe >>> 17;
-            probe ^= probe << 5;
             return probe;
         }
     }
 
-    static class XorShiftThreadProbe implements ThreadProbe {
+    static class XorShiftThreadProbe extends ThreadProbe {
 
         private final int mask;
 
@@ -382,7 +369,7 @@ public class Pools {
 
         private final ThreadProbe threadProbe;
 
-        private final AtomicReference<Node>[] heads;
+        private final AtomicReferenceArray<Node> heads;
 
         public StripedLockFreePool(int stripesCount, boolean allowUnsafe) {
             if (stripesCount <= 0) {
@@ -390,10 +377,7 @@ public class Pools {
             }
 
             int size = roundToPowerOfTwo(stripesCount);
-            this.heads = new AtomicReference[size * CACHE_LINE_PADDING];
-            for (int i = 0; i < size; i++) {
-                this.heads[i * CACHE_LINE_PADDING] = new AtomicReference<>();
-            }
+            this.heads = new AtomicReferenceArray<>(size * CACHE_LINE_PADDING);
 
             int mask = (size - 1) << CACHE_LINE_SHIFT;
             this.threadProbe = ThreadProbe.createThreadProbe(mask, allowUnsafe);
@@ -402,15 +386,14 @@ public class Pools {
         @Override
         public BufferRecycler acquireBufferRecycler() {
             int index = threadProbe.index();
-            AtomicReference<Node> head = heads[index];
 
             while (true) {
-                Node currentHead = head.get();
+                Node currentHead = heads.get(index);
                 if (currentHead == null) {
                     return new VThreadBufferRecycler(index);
                 }
 
-                if (head.compareAndSet(currentHead, currentHead.next)) {
+                if (heads.compareAndSet(index, currentHead, currentHead.next)) {
                     currentHead.next = null;
                     return currentHead.value;
                 }
@@ -421,11 +404,10 @@ public class Pools {
         public void releaseBufferRecycler(BufferRecycler recycler) {
             VThreadBufferRecycler vThreadBufferRecycler = (VThreadBufferRecycler) recycler;
             Node newHead = new Node(vThreadBufferRecycler);
-            AtomicReference<Node> head = heads[vThreadBufferRecycler.slot];
 
             while (true) {
-                newHead.next = head.get();
-                if (head.compareAndSet(newHead.next, newHead)) {
+                newHead.next = heads.get(vThreadBufferRecycler.slot);
+                if (heads.compareAndSet(vThreadBufferRecycler.slot, newHead.next, newHead)) {
                     return;
                 }
             }
