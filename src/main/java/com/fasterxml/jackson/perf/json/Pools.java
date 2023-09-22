@@ -387,15 +387,18 @@ public class Pools {
         public BufferRecycler acquireBufferRecycler() {
             int index = threadProbe.index();
 
+            Node currentHead = heads.get(index);
             while (true) {
-                Node currentHead = heads.get(index);
                 if (currentHead == null) {
                     return new VThreadBufferRecycler(index);
                 }
 
-                if (heads.compareAndSet(index, currentHead, currentHead.next)) {
+                Node witness = heads.compareAndExchange(index, currentHead, currentHead.next);
+                if (witness == currentHead) {
                     currentHead.next = null;
                     return currentHead.value;
+                } else {
+                    currentHead = witness;
                 }
             }
         }
@@ -405,10 +408,14 @@ public class Pools {
             VThreadBufferRecycler vThreadBufferRecycler = (VThreadBufferRecycler) recycler;
             Node newHead = new Node(vThreadBufferRecycler);
 
+            Node next = heads.get(vThreadBufferRecycler.slot);
             while (true) {
-                newHead.next = heads.get(vThreadBufferRecycler.slot);
-                if (heads.compareAndSet(vThreadBufferRecycler.slot, newHead.next, newHead)) {
+                Node witness = heads.compareAndExchange(vThreadBufferRecycler.slot, next, newHead);
+                if (witness == next) {
+                    newHead.next = next;
                     return;
+                } else {
+                    next = witness;
                 }
             }
         }
