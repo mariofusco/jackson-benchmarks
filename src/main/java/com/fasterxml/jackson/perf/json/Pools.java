@@ -3,13 +3,13 @@ package com.fasterxml.jackson.perf.json;
 import com.fasterxml.jackson.core.util.BufferRecycler;
 import com.fasterxml.jackson.core.util.BufferRecyclerPool;
 import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
-import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -22,7 +22,10 @@ public class Pools {
         JCTOOLS(JCToolsPool.INSTANCE),
         STRIPED_LOCK_FREE(STRIPED_LOCK_FREE_INSTANCE),
         STRIPED_JCTOOLS(STRIPED_JCTOOLS_INSTANCE),
-        HYBRID(HybridPool.INSTANCE);
+        HYBRID_JCTOOLS(HybridJCToolsPool.INSTANCE),
+        HYBRID_JCTOOLS_UNSAFE(HybridJCToolsPoolUnsafe.INSTANCE),
+        HYBRID_LOCK_FREE(HybridLockFreePool.INSTANCE),
+        HYBRID_LOCK_FREE_UNSAFE(HybridLockFreePoolUnsafe.INSTANCE);
 
         private final BufferRecyclerPool pool;
 
@@ -105,32 +108,122 @@ public class Pools {
         }
     }
 
-    static class HybridPool implements BufferRecyclerPool {
+    static class VirtualPredicate {
+        private static final MethodHandle virtualMh = findVirtualMH();
 
-        static final BufferRecyclerPool INSTANCE = new HybridPool();
-
-        private static final Predicate<Thread> isVirtual = findIsVirtual();
-
-        private static Predicate<Thread> findIsVirtual() {
+        private static MethodHandle findVirtualMH() {
             try {
-                MethodHandle virtualMh = MethodHandles.publicLookup().findVirtual(Thread.class, "isVirtual", MethodType.methodType(boolean.class));
-                return t -> {
-                    try {
-                        return (boolean) virtualMh.invokeExact(t);
-                    } catch (Throwable e) {
-                        throw new RuntimeException(e);
-                    }
-                };
+                return MethodHandles.publicLookup().findVirtual(Thread.class, "isVirtual", MethodType.methodType(boolean.class));
             } catch (Exception e) {
-                return t -> false;
+                return null;
             }
         }
+
+        private static Predicate<Thread> findIsVirtualPredicate() {
+            return virtualMh != null ? t -> {
+                try {
+                    return (boolean) virtualMh.invokeExact(t);
+                } catch (Throwable e) {
+                    throw new RuntimeException(e);
+                }
+            } : t -> false;
+        }
+    }
+
+    interface ThreadProbe {
+        int index();
+
+        static ThreadProbe createThreadProbe(int mask, boolean allowUnsafe) {
+            return allowUnsafe ? new UnsafeThreadProbe(mask) : new XorShiftThreadProbe(mask);
+        }
+    }
+
+    static class UnsafeThreadProbe implements ThreadProbe {
+
+        private static final long PROBE = getProbeOffset();
+
+        private final int mask;
+
+
+        UnsafeThreadProbe(int mask) {
+            this.mask = mask;
+        }
+
+        private static long getProbeOffset() {
+            try {
+                return UnsafeAccess.UNSAFE.objectFieldOffset(Thread.class.getDeclaredField("threadLocalRandomProbe"));
+            } catch (NoSuchFieldException e) {
+                return -1L;
+            }
+        }
+
+        @Override
+        public int index() {
+            return probe() & mask;
+        }
+
+        private int probe() {
+            // Fast path for reliable well-distributed probe, available from JDK 7+.
+            // As long as PROBE is final static this branch will be constant folded
+            // (i.e removed).
+            if (PROBE != -1) {
+                int probe;
+                if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
+                    ThreadLocalRandom.current(); // force initialization
+                    probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
+                }
+                return probe;
+            }
+
+            /*
+             * Else use much worse (for values distribution) method:
+             * Mix thread id with golden ratio and then xorshift it
+             * to spread consecutive ids (see Knuth multiplicative method as reference).
+             */
+            int probe = (int) ((Thread.currentThread().getId() * 0x9e3779b9) & Integer.MAX_VALUE);
+            // xorshift
+            probe ^= probe << 13;
+            probe ^= probe >>> 17;
+            probe ^= probe << 5;
+            return probe;
+        }
+    }
+
+    static class XorShiftThreadProbe implements ThreadProbe {
+
+        private final int mask;
+
+
+        XorShiftThreadProbe(int mask) {
+            this.mask = mask;
+        }
+
+        @Override
+        public int index() {
+            return probe() & mask;
+        }
+
+        private int probe() {
+            int probe = (int) ((Thread.currentThread().getId() * 0x9e3779b9) & Integer.MAX_VALUE);
+            // xorshift
+            probe ^= probe << 13;
+            probe ^= probe >>> 17;
+            probe ^= probe << 5;
+            return probe;
+        }
+    }
+
+    static class HybridJCToolsPoolUnsafe implements BufferRecyclerPool {
+
+        static final BufferRecyclerPool INSTANCE = new HybridJCToolsPoolUnsafe();
+
+        private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
 
         private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
 
         static class VirtualPoolHolder {
             // Lazy on-demand initialization
-            private static final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4);
+            private static final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4, true);
         }
 
         @Override
@@ -148,86 +241,216 @@ public class Pools {
             }
             // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
         }
+    }
 
-        static class StripedJCToolsPool implements BufferRecyclerPool {
+    static class HybridJCToolsPool implements BufferRecyclerPool {
 
-            private static final long PROBE = getProbeOffset();
+        static final BufferRecyclerPool INSTANCE = new HybridJCToolsPool();
 
-            private final int mask;
+        private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
 
-            private final MpmcUnboundedXaddArrayQueue<BufferRecycler>[] queues;
+        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
 
-            public StripedJCToolsPool(int stripesCount) {
-                if (stripesCount <= 0) {
-                    throw new IllegalArgumentException("Expecting a stripesCount that is larger than 0");
-                }
+        static class VirtualPoolHolder {
+            // Lazy on-demand initialization
+            private static final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4, false);
+        }
 
-                int size = Pow2.roundToPowerOfTwo(stripesCount);
-                mask = (size - 1);
+        @Override
+        public BufferRecycler acquireBufferRecycler() {
+            return isVirtual.test(Thread.currentThread()) ?
+                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
+                    nativePool.acquireBufferRecycler();
+        }
 
-                this.queues = new MpmcUnboundedXaddArrayQueue[size];
-                for (int i = 0; i < size; i++) {
-                    this.queues[i] = new MpmcUnboundedXaddArrayQueue<>(128);
-                }
+        @Override
+        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+            if (bufferRecycler instanceof VThreadBufferRecycler) {
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
+                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+            }
+            // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
+        }
+    }
+
+    static class StripedJCToolsPool implements BufferRecyclerPool {
+
+        private final ThreadProbe threadProbe;
+
+        private final MpmcUnboundedXaddArrayQueue<BufferRecycler>[] queues;
+
+        public StripedJCToolsPool(int stripesCount, boolean allowUnsafe) {
+            if (stripesCount <= 0) {
+                throw new IllegalArgumentException("Expecting a stripesCount that is larger than 0");
             }
 
-            private static long getProbeOffset() {
-                try {
-                    return UnsafeAccess.UNSAFE.objectFieldOffset(Thread.class.getDeclaredField("threadLocalRandomProbe"));
-                } catch (NoSuchFieldException e) {
-                    return -1L;
-                }
-            }
+            int size = roundToPowerOfTwo(stripesCount);
+            this.threadProbe = ThreadProbe.createThreadProbe(size - 1, allowUnsafe);
 
-            private int index() {
-                return probe() & mask;
-            }
-
-            private int probe() {
-                // Fast path for reliable well-distributed probe, available from JDK 7+.
-                // As long as PROBE is final static this branch will be constant folded
-                // (i.e removed).
-                if (PROBE != -1) {
-                    int probe;
-                    if ((probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE)) == 0) {
-                        ThreadLocalRandom.current(); // force initialization
-                        probe = UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), PROBE);
-                    }
-                    return probe;
-                }
-
-                /*
-                 * Else use much worse (for values distribution) method:
-                 * Mix thread id with golden ratio and then xorshift it
-                 * to spread consecutive ids (see Knuth multiplicative method as reference).
-                 */
-                int probe = (int) ((Thread.currentThread().getId() * 0x9e3779b9) & Integer.MAX_VALUE);
-                // xorshift
-                probe ^= probe << 13;
-                probe ^= probe >>> 17;
-                probe ^= probe << 5;
-                return probe;
-            }
-
-            @Override
-            public BufferRecycler acquireBufferRecycler() {
-                int index = index();
-                BufferRecycler bufferRecycler = queues[index].poll();
-                return bufferRecycler != null ? bufferRecycler : new VThreadBufferRecycler(index);
-            }
-
-            @Override
-            public void releaseBufferRecycler(BufferRecycler recycler) {
-                queues[((VThreadBufferRecycler) recycler).slot].offer(recycler);
+            this.queues = new MpmcUnboundedXaddArrayQueue[size];
+            for (int i = 0; i < size; i++) {
+                this.queues[i] = new MpmcUnboundedXaddArrayQueue<>(128);
             }
         }
 
-        static class VThreadBufferRecycler extends BufferRecycler {
-            private final int slot;
+        @Override
+        public BufferRecycler acquireBufferRecycler() {
+            int index = threadProbe.index();
+            BufferRecycler bufferRecycler = queues[index].poll();
+            return bufferRecycler != null ? bufferRecycler : new VThreadBufferRecycler(index);
+        }
 
-            VThreadBufferRecycler(int slot) {
-                this.slot = slot;
+        @Override
+        public void releaseBufferRecycler(BufferRecycler recycler) {
+            queues[((VThreadBufferRecycler) recycler).slot].offer(recycler);
+        }
+    }
+
+    static class VThreadBufferRecycler extends BufferRecycler {
+        private final int slot;
+
+        VThreadBufferRecycler(int slot) {
+            this.slot = slot;
+        }
+    }
+
+    static class HybridLockFreePoolUnsafe implements BufferRecyclerPool {
+
+        static final BufferRecyclerPool INSTANCE = new HybridLockFreePoolUnsafe();
+
+        private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
+
+        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+
+        static class VirtualPoolHolder {
+            // Lazy on-demand initialization
+            private static final BufferRecyclerPool virtualPool = new StripedLockFreePool(4, true);
+        }
+
+        @Override
+        public BufferRecycler acquireBufferRecycler() {
+            return isVirtual.test(Thread.currentThread()) ?
+                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
+                    nativePool.acquireBufferRecycler();
+        }
+
+        @Override
+        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+            if (bufferRecycler instanceof VThreadBufferRecycler) {
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
+                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+            }
+            // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
+        }
+    }
+
+    static class HybridLockFreePool implements BufferRecyclerPool {
+
+        static final BufferRecyclerPool INSTANCE = new HybridLockFreePool();
+
+        private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
+
+        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+
+        static class VirtualPoolHolder {
+            // Lazy on-demand initialization
+            private static final BufferRecyclerPool virtualPool = new StripedLockFreePool(4, false);
+        }
+
+        @Override
+        public BufferRecycler acquireBufferRecycler() {
+            return isVirtual.test(Thread.currentThread()) ?
+                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
+                    nativePool.acquireBufferRecycler();
+        }
+
+        @Override
+        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+            if (bufferRecycler instanceof VThreadBufferRecycler) {
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
+                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+            }
+            // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
+        }
+    }
+
+    static class StripedLockFreePool implements BufferRecyclerPool {
+
+        private static final int CACHE_LINE_SHIFT = 4;
+
+        private static final int CACHE_LINE_PADDING = 1 << CACHE_LINE_SHIFT;
+
+        private final ThreadProbe threadProbe;
+
+        private final AtomicReference<Node>[] heads;
+
+        public StripedLockFreePool(int stripesCount, boolean allowUnsafe) {
+            if (stripesCount <= 0) {
+                throw new IllegalArgumentException("Expecting a stripesCount that is larger than 0");
+            }
+
+            int size = roundToPowerOfTwo(stripesCount);
+            this.heads = new AtomicReference[size * CACHE_LINE_PADDING];
+            for (int i = 0; i < size; i++) {
+                this.heads[i * CACHE_LINE_PADDING] = new AtomicReference<>();
+            }
+
+            int mask = (size - 1) << CACHE_LINE_SHIFT;
+            this.threadProbe = ThreadProbe.createThreadProbe(mask, allowUnsafe);
+        }
+
+        @Override
+        public BufferRecycler acquireBufferRecycler() {
+            int index = threadProbe.index();
+            AtomicReference<Node> head = heads[index];
+
+            while (true) {
+                Node currentHead = head.get();
+                if (currentHead == null) {
+                    return new VThreadBufferRecycler(index);
+                }
+
+                if (head.compareAndSet(currentHead, currentHead.next)) {
+                    currentHead.next = null;
+                    return currentHead.value;
+                }
             }
         }
+
+        @Override
+        public void releaseBufferRecycler(BufferRecycler recycler) {
+            VThreadBufferRecycler vThreadBufferRecycler = (VThreadBufferRecycler) recycler;
+            Node newHead = new Node(vThreadBufferRecycler);
+            AtomicReference<Node> head = heads[vThreadBufferRecycler.slot];
+
+            while (true) {
+                newHead.next = head.get();
+                if (head.compareAndSet(newHead.next, newHead)) {
+                    return;
+                }
+            }
+        }
+
+        private static class Node {
+            final VThreadBufferRecycler value;
+            Node next;
+
+            Node(VThreadBufferRecycler value) {
+                this.value = value;
+            }
+        }
+    }
+
+    public static final int MAX_POW2 = 1 << 30;
+
+    public static int roundToPowerOfTwo(final int value) {
+        if (value > MAX_POW2) {
+            throw new IllegalArgumentException("There is no larger power of 2 int for value:"+value+" since it exceeds 2^31.");
+        }
+        if (value < 0) {
+            throw new IllegalArgumentException("Given value:"+value+". Expecting value >= 0.");
+        }
+        final int nextPow2 = 1 << (32 - Integer.numberOfLeadingZeros(value - 1));
+        return nextPow2;
     }
 }

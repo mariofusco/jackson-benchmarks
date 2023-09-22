@@ -17,7 +17,7 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <version.jmh>1.35</version.jmh>
+        <version.jmh>1.37</version.jmh>
 
         <version.jackson.bson>2.13.1</version.jackson.bson>
         <version.jackson.msgpack>0.9.3</version.jackson.msgpack>
@@ -170,9 +170,8 @@
    accidental odd results (they vary between major JDK versions)
   -->
             <configuration>
-              <source>20</source>
-              <target>20</target>
-              <compilerArgument>--enable-preview</compilerArgument>
+              <source>21</source>
+              <target>21</target>
               <showDeprecation>true</showDeprecation>
               <showWarnings>true</showWarnings>
               <optimize>true</optimize>

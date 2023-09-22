@@ -13,6 +13,7 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
 import java.io.IOException;
@@ -22,8 +23,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 @State(value = Scope.Benchmark)
-@Measurement(iterations = 10)
-@Fork(1)
+@Warmup(iterations = 10)
+@Measurement(iterations = 20)
+@Fork(2)
 public class JacksonMultithreadWriteVanilla {
     private JSON json;
 
@@ -42,8 +44,7 @@ public class JacksonMultithreadWriteVanilla {
     @Param({"small"})
     private String objectSize;
 
-//    @Param({"NO_OP", "THREAD_LOCAL", "LOCK_FREE", "CONCURRENT_DEQUEUE"})
-    @Param({"THREAD_LOCAL", "HYBRID"})
+    @Param({"THREAD_LOCAL", "HYBRID_JCTOOLS", "HYBRID_LOCK_FREE", "HYBRID_JCTOOLS_UNSAFE", "HYBRID_LOCK_FREE_UNSAFE"})
     private String poolStrategy;
 
     @Setup
@@ -61,7 +62,7 @@ public class JacksonMultithreadWriteVanilla {
 
     @Benchmark
     @OutputTimeUnit(TimeUnit.SECONDS)
-    public void writePojoMediaItem(Blackhole bh) throws Exception {
+    public void writePojoMediaItem(Blackhole bh) {
         CountDownLatch countDown = new CountDownLatch(parallelTasks);
 
         for (int i = 0; i < parallelTasks; i++) {
@@ -129,6 +130,20 @@ public class JacksonMultithreadWriteVanilla {
 
         public void setAge(int age) {
             this.age = age;
+        }
+    }
+
+    public static void main(String[] args) {
+        JacksonMultithreadWriteVanilla benchmark = new JacksonMultithreadWriteVanilla();
+        benchmark.poolStrategy = "HYBRID_LOCK_FREE";
+        benchmark.objectSize = "small";
+        benchmark.parallelTasks = 100;
+        benchmark.useVirtualThreads = true;
+        benchmark.setup();
+
+        Blackhole bh = new Blackhole("Today's password is swordfish. I understand instantiating Blackholes directly is dangerous.");
+        for (int i = 0; i < 10; i++) {
+            benchmark.writePojoMediaItem(bh);
         }
     }
 }
