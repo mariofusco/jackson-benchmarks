@@ -2,11 +2,10 @@ package com.fasterxml.jackson.perf.json;
 
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.util.BufferRecycler;
-import com.fasterxml.jackson.core.util.BufferRecyclerPool;
+import com.fasterxml.jackson.core.util.RecyclerPool;
 import com.fasterxml.jackson.jr.ob.JSON;
 import com.fasterxml.jackson.perf.model.MediaItems;
 import com.fasterxml.jackson.perf.util.NopOutputStream;
-import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
@@ -49,7 +48,7 @@ public class JacksonWriteVanilla {
     }
 
     private JSON createJson() {
-        BufferRecyclerPool pool = Pools.PoolStrategy.valueOf(poolStrategy).getPool();
+        RecyclerPool<BufferRecycler> pool = Pools.PoolStrategy.valueOf(poolStrategy).getPool();
         JsonFactory jsonFactory = new JsonFactory().setBufferRecyclerPool(pool);
         return new JSON(jsonFactory);
     }

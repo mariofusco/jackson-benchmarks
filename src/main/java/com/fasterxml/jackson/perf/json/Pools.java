@@ -1,7 +1,8 @@
 package com.fasterxml.jackson.perf.json;
 
 import com.fasterxml.jackson.core.util.BufferRecycler;
-import com.fasterxml.jackson.core.util.BufferRecyclerPool;
+import com.fasterxml.jackson.core.util.RecyclerPool;
+import com.fasterxml.jackson.core.util.JsonBufferRecyclers;
 import org.jctools.queues.MpmcUnboundedXaddArrayQueue;
 import org.jctools.util.UnsafeAccess;
 
@@ -9,17 +10,16 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 public class Pools {
     enum PoolStrategy {
-        NO_OP(BufferRecyclerPool.nonRecyclingPool()),
-        THREAD_LOCAL(BufferRecyclerPool.threadLocalPool()),
-        CONCURRENT_DEQUEUE(BufferRecyclerPool.ConcurrentDequePool.shared()),
-        LOCK_FREE(BufferRecyclerPool.LockFreePool.shared()),
+        NO_OP(JsonBufferRecyclers.nonRecyclingPool()),
+        THREAD_LOCAL(JsonBufferRecyclers.threadLocalPool()),
+        CONCURRENT_DEQUEUE(JsonBufferRecyclers.sharedConcurrentDequePool()),
+        LOCK_FREE(JsonBufferRecyclers.sharedLockFreePool()),
         JCTOOLS(JCToolsPool.INSTANCE),
         STRIPED_LOCK_FREE(STRIPED_LOCK_FREE_INSTANCE),
         STRIPED_JCTOOLS(STRIPED_JCTOOLS_INSTANCE),
@@ -28,50 +28,50 @@ public class Pools {
         HYBRID_LOCK_FREE(HybridLockFreePool.INSTANCE),
         HYBRID_LOCK_FREE_UNSAFE(HybridLockFreePoolUnsafe.INSTANCE);
 
-        private final BufferRecyclerPool pool;
+        private final RecyclerPool<BufferRecycler> pool;
 
-        PoolStrategy(BufferRecyclerPool pool) {
+        PoolStrategy(RecyclerPool pool) {
             this.pool = pool;
         }
 
-        public BufferRecyclerPool getPool() {
+        public RecyclerPool<BufferRecycler> getPool() {
             return pool;
         }
     }
 
-    static class JCToolsPool implements BufferRecyclerPool {
+    static class JCToolsPool implements RecyclerPool<BufferRecycler> {
 
-        static final BufferRecyclerPool INSTANCE = new JCToolsPool();
+        static final RecyclerPool INSTANCE = new JCToolsPool();
 
         private final MpmcUnboundedXaddArrayQueue<BufferRecycler> queue = new MpmcUnboundedXaddArrayQueue<>(256);
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             BufferRecycler bufferRecycler = queue.poll();
             return bufferRecycler != null ? bufferRecycler : new BufferRecycler();
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
+        public void releasePooled(BufferRecycler recycler) {
             queue.offer(recycler);
         }
     }
 
-    private static final BufferRecyclerPool STRIPED_JCTOOLS_INSTANCE = new StripedPool(JCToolsPool::new, 4);
+    private static final RecyclerPool STRIPED_JCTOOLS_INSTANCE = new StripedPool(JCToolsPool::new, 4);
 
-    private static final BufferRecyclerPool STRIPED_LOCK_FREE_INSTANCE = new StripedPool(BufferRecyclerPool.LockFreePool::nonShared, 4);
+    private static final RecyclerPool STRIPED_LOCK_FREE_INSTANCE = new StripedPool(JsonBufferRecyclers::newLockFreePool, 4);
 
-    static class StripedPool implements BufferRecyclerPool {
+    static class StripedPool implements RecyclerPool<BufferRecycler> {
 
         private static final long PROBE = getProbeOffset();
 
         private final int mask;
 
-        private final BufferRecyclerPool[] pools;
+        private final RecyclerPool<BufferRecycler>[] pools;
 
-        public StripedPool(Supplier<BufferRecyclerPool> poolFactory, int slots) {
+        public StripedPool(Supplier<RecyclerPool<BufferRecycler>> poolFactory, int slots) {
             this.mask = slots-1;
-            this.pools = new BufferRecyclerPool[slots];
+            this.pools = new RecyclerPool[slots];
             for (int i = 0; i < slots; i++) {
                 this.pools[i] = poolFactory.get();
             }
@@ -99,13 +99,13 @@ public class Pools {
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
-            return pools[index()].acquireBufferRecycler();
+        public BufferRecycler acquirePooled() {
+            return pools[index()].acquirePooled();
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
-            pools[index()].releaseBufferRecycler(recycler);
+        public void releasePooled(BufferRecycler recycler) {
+            pools[index()].releasePooled(recycler);
         }
     }
 
@@ -200,67 +200,67 @@ public class Pools {
         }
     }
 
-    static class HybridJCToolsPoolUnsafe implements BufferRecyclerPool {
+    static class HybridJCToolsPoolUnsafe implements RecyclerPool<BufferRecycler> {
 
-        static final BufferRecyclerPool INSTANCE = new HybridJCToolsPoolUnsafe();
+        static final RecyclerPool<BufferRecycler> INSTANCE = new HybridJCToolsPoolUnsafe();
 
         private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
 
-        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+        private final RecyclerPool<BufferRecycler> nativePool = JsonBufferRecyclers.threadLocalPool();
 
         static class VirtualPoolHolder {
             // Lazy on-demand initialization
-            private static final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4, true);
+            private static final RecyclerPool<BufferRecycler> virtualPool = new StripedJCToolsPool(4, true);
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             return isVirtual.test(Thread.currentThread()) ?
-                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
-                    nativePool.acquireBufferRecycler();
+                    VirtualPoolHolder.virtualPool.acquirePooled() :
+                    nativePool.acquirePooled();
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+        public void releasePooled(BufferRecycler bufferRecycler) {
             if (bufferRecycler instanceof VThreadBufferRecycler) {
-                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
-                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be released to the same pool
+                VirtualPoolHolder.virtualPool.releasePooled(bufferRecycler);
             }
             // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
         }
     }
 
-    static class HybridJCToolsPool implements BufferRecyclerPool {
+    static class HybridJCToolsPool implements RecyclerPool<BufferRecycler> {
 
-        static final BufferRecyclerPool INSTANCE = new HybridJCToolsPool();
+        static final RecyclerPool<BufferRecycler> INSTANCE = new HybridJCToolsPool();
 
         private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
 
-        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+        private final RecyclerPool<BufferRecycler> nativePool = JsonBufferRecyclers.threadLocalPool();
 
         static class VirtualPoolHolder {
             // Lazy on-demand initialization
-            private static final BufferRecyclerPool virtualPool = new StripedJCToolsPool(4, false);
+            private static final RecyclerPool<BufferRecycler> virtualPool = new StripedJCToolsPool(4, false);
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             return isVirtual.test(Thread.currentThread()) ?
-                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
-                    nativePool.acquireBufferRecycler();
+                    VirtualPoolHolder.virtualPool.acquirePooled() :
+                    nativePool.acquirePooled();
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+        public void releasePooled(BufferRecycler bufferRecycler) {
             if (bufferRecycler instanceof VThreadBufferRecycler) {
-                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
-                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be released to the same pool
+                VirtualPoolHolder.virtualPool.releasePooled(bufferRecycler);
             }
             // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
         }
     }
 
-    static class StripedJCToolsPool implements BufferRecyclerPool {
+    static class StripedJCToolsPool implements RecyclerPool<BufferRecycler> {
 
         private final ThreadProbe threadProbe;
 
@@ -281,14 +281,14 @@ public class Pools {
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             int index = threadProbe.index();
             BufferRecycler bufferRecycler = queues[index].poll();
             return bufferRecycler != null ? bufferRecycler : new VThreadBufferRecycler(index);
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
+        public void releasePooled(BufferRecycler recycler) {
             queues[((VThreadBufferRecycler) recycler).slot].offer(recycler);
         }
     }
@@ -301,67 +301,67 @@ public class Pools {
         }
     }
 
-    static class HybridLockFreePoolUnsafe implements BufferRecyclerPool {
+    static class HybridLockFreePoolUnsafe implements RecyclerPool<BufferRecycler> {
 
-        static final BufferRecyclerPool INSTANCE = new HybridLockFreePoolUnsafe();
+        static final RecyclerPool<BufferRecycler> INSTANCE = new HybridLockFreePoolUnsafe();
 
         private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
 
-        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+        private final RecyclerPool<BufferRecycler> nativePool = JsonBufferRecyclers.threadLocalPool();
 
         static class VirtualPoolHolder {
             // Lazy on-demand initialization
-            private static final BufferRecyclerPool virtualPool = new StripedLockFreePool(4, true);
+            private static final RecyclerPool<BufferRecycler> virtualPool = new StripedLockFreePool(4, true);
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             return isVirtual.test(Thread.currentThread()) ?
-                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
-                    nativePool.acquireBufferRecycler();
+                    VirtualPoolHolder.virtualPool.acquirePooled() :
+                    nativePool.acquirePooled();
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+        public void releasePooled(BufferRecycler bufferRecycler) {
             if (bufferRecycler instanceof VThreadBufferRecycler) {
-                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
-                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be released to the same pool
+                VirtualPoolHolder.virtualPool.releasePooled(bufferRecycler);
             }
             // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
         }
     }
 
-    static class HybridLockFreePool implements BufferRecyclerPool {
+    static class HybridLockFreePool implements RecyclerPool<BufferRecycler> {
 
-        static final BufferRecyclerPool INSTANCE = new HybridLockFreePool();
+        static final RecyclerPool INSTANCE = new HybridLockFreePool();
 
         private static final Predicate<Thread> isVirtual = VirtualPredicate.findIsVirtualPredicate();
 
-        private final BufferRecyclerPool nativePool = BufferRecyclerPool.threadLocalPool();
+        private final RecyclerPool<BufferRecycler> nativePool = JsonBufferRecyclers.threadLocalPool();
 
         static class VirtualPoolHolder {
             // Lazy on-demand initialization
-            private static final BufferRecyclerPool virtualPool = new StripedLockFreePool(4, false);
+            private static final RecyclerPool<BufferRecycler> virtualPool = new StripedLockFreePool(4, false);
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             return isVirtual.test(Thread.currentThread()) ?
-                    VirtualPoolHolder.virtualPool.acquireBufferRecycler() :
-                    nativePool.acquireBufferRecycler();
+                    VirtualPoolHolder.virtualPool.acquirePooled() :
+                    nativePool.acquirePooled();
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler bufferRecycler) {
+        public void releasePooled(BufferRecycler bufferRecycler) {
             if (bufferRecycler instanceof VThreadBufferRecycler) {
-                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be release to the same pool
-                VirtualPoolHolder.virtualPool.releaseBufferRecycler(bufferRecycler);
+                // if it is a PooledBufferRecycler it has been acquired by a virtual thread, so it has to be released to the same pool
+                VirtualPoolHolder.virtualPool.releasePooled(bufferRecycler);
             }
             // the native thread pool is based on ThreadLocal, so it doesn't have anything to do on release
         }
     }
 
-    static class StripedLockFreePool implements BufferRecyclerPool {
+    static class StripedLockFreePool implements RecyclerPool<BufferRecycler> {
 
         private static final int CACHE_LINE_SHIFT = 4;
 
@@ -384,7 +384,7 @@ public class Pools {
         }
 
         @Override
-        public BufferRecycler acquireBufferRecycler() {
+        public BufferRecycler acquirePooled() {
             int index = threadProbe.index();
 
             Node currentHead = heads.get(index);
@@ -404,7 +404,7 @@ public class Pools {
         }
 
         @Override
-        public void releaseBufferRecycler(BufferRecycler recycler) {
+        public void releasePooled(BufferRecycler recycler) {
             VThreadBufferRecycler vThreadBufferRecycler = (VThreadBufferRecycler) recycler;
             Node newHead = new Node(vThreadBufferRecycler);
 
